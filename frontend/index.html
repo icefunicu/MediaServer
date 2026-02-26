@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <meta name="description" content="本地媒体服务器 - 视频流媒体播放、漫画阅读、文件浏览">
+    <title>本地媒体服务器</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📺</text></svg>">
+</head>
+<body>
+    <header class="header">
+        <div class="header-content">
+            <h1 class="logo" onclick="goHome()">📺 本地媒体服务器</h1>
+            <div class="search-box">
+                <input type="text" id="searchInput" placeholder="搜索文件..." onkeypress="handleSearch(event)">
+                <button onclick="searchFiles()" class="btn-search">搜索</button>
+            </div>
+        </div>
+    </header>
+
+    <main class="main-content">
+        <nav class="breadcrumb" id="breadcrumb">
+            <span onclick="goHome()" class="breadcrumb-item">根目录</span>
+        </nav>
+
+        <div class="view-container" id="viewContainer">
+            <div class="file-browser" id="fileBrowser">
+                <div class="file-list" id="fileList"></div>
+            </div>
+
+            <div class="media-viewer hidden" id="mediaViewer">
+                <div class="viewer-header">
+                    <button class="btn-back" onclick="closeViewer()">← 返回</button>
+                    <h2 id="viewerTitle"></h2>
+                </div>
+                <div class="viewer-content" id="viewerContent"></div>
+            </div>
+        </div>
+
+        <div class="loading-overlay hidden" id="loadingOverlay">
+            <div class="spinner"></div>
+            <p>加载中...</p>
+        </div>
+
+        <div class="error-toast hidden" id="errorToast">
+            <p id="errorMessage"></p>
+            <button onclick="closeError()">关闭</button>
+        </div>
+    </main>
+
+    <footer class="footer">
+        <p>本地媒体服务器 v1.0.0 | 前端 <span id="appVersion">loading</span></p>
+    </footer>
+
+    <script src="/static/app.js?v=20260227-6"></script>
+</body>
+</html>

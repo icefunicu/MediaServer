@@ -1,0 +1,72 @@
+# 本地媒体服务器配置文件
+
+# 服务器配置
+server:
+  # 服务器监听地址
+  host: "0.0.0.0"
+  # 服务器监听端口
+  port: 8001
+  # 调试模式
+  debug: true
+
+# 媒体文件配置
+media:
+  # 媒体文件根目录
+  root_directory: "E:/NewFloder"
+  # 支持的视频格式
+  video_formats:
+    - ".mp4"
+    - ".mkv"
+    - ".ts"
+    - ".avi"
+    - ".mov"
+  # 支持的漫画格式
+  comic_formats:
+    - ".cbz"
+    - ".cbr"
+    - ".zip"
+    - ".7z"
+  # 支持的压缩包格式
+  archive_formats:
+    - ".zip"
+    - ".rar"
+    - ".7z"
+
+# 缓存配置
+cache:
+  # 内存缓存大小（字节）
+  memory_cache_size: 104857600  # 100MB
+  # 磁盘缓存大小（字节）
+  disk_cache_size: 10737418240  # 10GB
+  # 元数据缓存 TTL（秒）
+  metadata_ttl: 3600  # 1小时
+  # 图片缓存 TTL（秒）
+  image_ttl: 3600  # 1小时
+  # 转码视频缓存 TTL（秒）
+  transcoded_ttl: 86400  # 24小时
+
+# 安全配置
+security:
+  # 最大并发连接数
+  max_concurrent_connections: 100
+  # 每分钟请求速率限制
+  rate_limit_per_minute: 60
+  # 最大文件大小（字节）
+  max_file_size: 104857600  # 100MB
+  # 最大解压大小（字节）
+  max_extracted_size: 1073741824  # 1GB
+  # 压缩比限制
+  compression_ratio_limit: 1000
+
+# 日志配置
+log:
+  # 日志级别: DEBUG, INFO, WARNING, ERROR
+  level: "INFO"
+  # 日志格式: json, text
+  format: "text"
+  # 日志文件路径
+  file: "logs/app.log"
+  # 单个日志文件最大字节数
+  max_bytes: 10485760  # 10MB
+  # 保留的日志文件数量
+  backup_count: 5
