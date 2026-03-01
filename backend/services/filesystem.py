@@ -17,6 +17,28 @@ from backend.logging_config import get_logger
 
 logger = get_logger("filesystem")
 
+_COMPOSITE_EXTENSIONS = (".tar.gz", ".tar.bz2", ".tar.xz")
+_EXTRA_COMIC_FORMATS = {
+    ".cb7",
+    ".cbt",
+    ".tar",
+    ".tar.gz",
+    ".tgz",
+    ".tar.bz2",
+    ".tbz2",
+    ".tar.xz",
+    ".txz",
+}
+
+
+def detect_extension(path: Path) -> str:
+    """Detect extension, including composite ones such as .tar.gz."""
+    lower_name = path.name.lower()
+    for ext in _COMPOSITE_EXTENSIONS:
+        if lower_name.endswith(ext):
+            return ext
+    return path.suffix.lower()
+
 
 class SecurityError(Exception):
     """安全错误异常"""
@@ -113,8 +135,14 @@ def validate_path(requested_path: str) -> str:
         r'^programdata',   # ProgramData
     ]
 
+    path_parts = [part for part in requested_path.split('/') if part]
     path_lower = requested_path.lower()
     for pattern in forbidden_patterns:
+        if pattern == r'\.\.':
+            if any(part in {".", ".."} for part in path_parts):
+                logger.warning(f"Path traversal blocked: {requested_path}, pattern: path-segment")
+                raise SecurityError("Access denied: path contains dangerous segments")
+            continue
         if re.search(pattern, path_lower):
             logger.warning(f"路径遍历攻击被阻止: {requested_path}, 匹配模式: {pattern}")
             raise SecurityError("禁止访问：路径包含危险模式")
@@ -149,7 +177,11 @@ def get_file_type(extension: str) -> str:
 
     if extension in config.media.video_formats:
         return "video"
-    elif extension in config.media.comic_formats:
+    elif extension in config.media.audio_formats:
+        return "music"
+    elif extension in config.media.image_formats:
+        return "photo"
+    elif extension in config.media.comic_formats or extension in _EXTRA_COMIC_FORMATS:
         return "comic"
     elif extension in config.media.archive_formats:
         return "archive"
@@ -176,7 +208,7 @@ def get_file_info(file_path: str) -> FileEntry:
             raise FileNotFoundError(f"文件不存在: {file_path}")
 
         stat = path.stat()
-        extension = path.suffix.lower()
+        extension = detect_extension(path)
 
         return FileEntry(
             id=generate_file_id(str(path)),
@@ -366,7 +398,7 @@ def get_file_size(file_path: str) -> int:
 
 def get_mime_type(file_path: str) -> str:
     """获取文件的 MIME 类型"""
-    extension = Path(file_path).suffix.lower()
+    extension = detect_extension(Path(file_path))
 
     mime_types = {
         '.mp4': 'video/mp4',
@@ -374,17 +406,37 @@ def get_mime_type(file_path: str) -> str:
         '.ts': 'video/mp2t',
         '.avi': 'video/x-msvideo',
         '.mov': 'video/quicktime',
+        '.vob': 'video/mpeg',
         '.webm': 'video/webm',
+        '.mp3': 'audio/mpeg',
+        '.flac': 'audio/flac',
+        '.m4a': 'audio/mp4',
+        '.wav': 'audio/wav',
+        '.aac': 'audio/aac',
+        '.ogg': 'audio/ogg',
+        '.wma': 'audio/x-ms-wma',
         '.cbz': 'application/vnd.comicbook+zip',
         '.cbr': 'application/vnd.comicbook-rar',
+        '.cb7': 'application/x-cb7',
+        '.cbt': 'application/x-cbt',
         '.zip': 'application/zip',
         '.rar': 'application/x-rar-compressed',
         '.7z': 'application/x-7z-compressed',
+        '.tar': 'application/x-tar',
+        '.tar.gz': 'application/gzip',
+        '.tgz': 'application/gzip',
+        '.tar.bz2': 'application/x-bzip2',
+        '.tbz2': 'application/x-bzip2',
+        '.tar.xz': 'application/x-xz',
+        '.txz': 'application/x-xz',
         '.jpg': 'image/jpeg',
         '.jpeg': 'image/jpeg',
         '.png': 'image/png',
         '.gif': 'image/gif',
         '.webp': 'image/webp',
+        '.bmp': 'image/bmp',
+        '.heic': 'image/heic',
+        '.avif': 'image/avif',
     }
 
     return mime_types.get(extension, 'application/octet-stream')

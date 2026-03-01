@@ -20,12 +20,45 @@ media:
     - ".ts"
     - ".avi"
     - ".mov"
+    - ".flv"
+    - ".rmvb"
+    - ".wmv"
+    - ".m4v"
+    - ".vob"
+  # 支持的音频格式
+  audio_formats:
+    - ".mp3"
+    - ".flac"
+    - ".m4a"
+    - ".wav"
+    - ".aac"
+    - ".ogg"
+    - ".wma"
+  # 支持的图片格式
+  image_formats:
+    - ".jpg"
+    - ".jpeg"
+    - ".png"
+    - ".webp"
+    - ".gif"
+    - ".bmp"
+    - ".heic"
+    - ".avif"
   # 支持的漫画格式
   comic_formats:
     - ".cbz"
     - ".cbr"
     - ".zip"
+    - ".cb7"
     - ".7z"
+    - ".cbt"
+    - ".tar"
+    - ".tar.gz"
+    - ".tgz"
+    - ".tar.bz2"
+    - ".tbz2"
+    - ".tar.xz"
+    - ".txz"
   # 支持的压缩包格式
   archive_formats:
     - ".zip"

@@ -7,7 +7,9 @@
 import io
 import os
 import tempfile
+import tarfile
 import zipfile
+import hashlib
 from pathlib import Path
 from typing import List, Optional, Tuple
 from pathlib import PurePosixPath
@@ -43,7 +45,72 @@ logger = get_logger("comic_reader")
 metadata_cache = LRUCache(maxsize=100)
 page_cache = LRUCache(maxsize=50)
 optimized_page_cache = LRUCache(maxsize=120)
+cover_binary_cache = LRUCache(maxsize=160)
 _pil_warning_emitted = False
+
+IMAGE_EXTENSIONS = {
+    '.jpg', '.jpeg', '.jpe', '.jfif', '.jfi', '.jif',
+    '.png', '.gif', '.webp', '.bmp', '.dib',
+    '.tif', '.tiff', '.avif', '.heic', '.pbm', '.pgm', '.ppm'
+}
+COMIC_ARCHIVE_FORMATS = {
+    '.cbz', '.zip',
+    '.cbr', '.rar',
+    '.cb7', '.7z',
+    '.cbt', '.tar', '.tar.gz', '.tgz', '.tar.bz2', '.tbz2', '.tar.xz', '.txz',
+}
+_ARCHIVE_EXTENSION_TO_KIND = {
+    '.cbz': 'zip',
+    '.zip': 'zip',
+    '.cbr': 'rar',
+    '.rar': 'rar',
+    '.cb7': '7z',
+    '.7z': '7z',
+    '.cbt': 'tar',
+    '.tar': 'tar',
+    '.tar.gz': 'tar',
+    '.tgz': 'tar',
+    '.tar.bz2': 'tar',
+    '.tbz2': 'tar',
+    '.tar.xz': 'tar',
+    '.txz': 'tar',
+}
+_ARCHIVE_KIND_PRIORITY = ("zip", "rar", "7z", "tar")
+_KNOWN_COMIC_SUFFIXES = tuple(sorted(COMIC_ARCHIVE_FORMATS, key=len, reverse=True))
+COVER_CACHE_DIR = Path(__file__).resolve().parents[2] / "cache" / "comic_covers"
+
+
+def _detect_declared_extension(path: Path) -> str:
+    """Detect extension from filename, prioritizing composite suffixes."""
+    name = path.name.lower()
+    for suffix in _KNOWN_COMIC_SUFFIXES:
+        if name.endswith(suffix):
+            return suffix
+    return path.suffix.lower()
+
+
+def _build_file_signature(path: Path) -> tuple[str, int]:
+    """Build stable file signature for cache keys."""
+    safe_path = str(path)
+    file_mtime_ns = path.stat().st_mtime_ns
+    return safe_path, file_mtime_ns
+
+
+def _build_cover_cache_identity(
+    file_path: str,
+    file_mtime_ns: int,
+    max_width: int,
+    quality: int,
+    output_format: str,
+) -> tuple[str, Path]:
+    raw_key = f"cover:{file_path}:{file_mtime_ns}:{max_width}:{quality}:{output_format}"
+    digest = hashlib.sha1(raw_key.encode("utf-8")).hexdigest()
+    file_ext = {
+        "jpeg": ".jpg",
+        "png": ".png",
+        "webp": ".webp",
+    }[output_format]
+    return raw_key, COVER_CACHE_DIR / f"{digest}{file_ext}"
 
 
 def _ensure_safe_archive_entry(entry_name: str) -> None:
@@ -239,6 +306,162 @@ def natural_sort_key(filename: str) -> List:
     return [int(p) if p.isdigit() else p.lower() for p in parts]
 
 
+def _read_image_entries_from_zip(path: Path) -> list[str]:
+    image_files: list[str] = []
+    with zipfile.ZipFile(path, 'r') as zf:
+        for name in zf.namelist():
+            _ensure_safe_archive_entry(name)
+            if name.startswith('__MACOSX'):
+                continue
+            ext = Path(name).suffix.lower()
+            if ext in IMAGE_EXTENSIONS and not name.endswith('/'):
+                image_files.append(name)
+    return image_files
+
+
+def _read_image_entries_from_rar(path: Path) -> list[str]:
+    image_files: list[str] = []
+    with rarfile.RarFile(path, 'r') as rf:
+        for name in rf.namelist():
+            _ensure_safe_archive_entry(name)
+            if name.startswith('__MACOSX'):
+                continue
+            ext = Path(name).suffix.lower()
+            if ext in IMAGE_EXTENSIONS and not name.endswith('/'):
+                image_files.append(name)
+    return image_files
+
+
+def _read_image_entries_from_7z(path: Path) -> list[str]:
+    image_files: list[str] = []
+    with py7zr.SevenZipFile(path, 'r') as szf:
+        for info in szf.list():
+            name = info.filename
+            _ensure_safe_archive_entry(name)
+            if name.startswith('__MACOSX') or info.is_directory:
+                continue
+            ext = Path(name).suffix.lower()
+            if ext in IMAGE_EXTENSIONS:
+                image_files.append(name)
+    return image_files
+
+
+def _read_image_entries_from_tar(path: Path) -> list[str]:
+    image_files: list[str] = []
+    with tarfile.open(path, "r:*") as tf:
+        for member in tf.getmembers():
+            name = member.name
+            _ensure_safe_archive_entry(name)
+            if name.startswith('__MACOSX') or member.isdir():
+                continue
+            ext = Path(name).suffix.lower()
+            if ext in IMAGE_EXTENSIONS:
+                image_files.append(name)
+    return image_files
+
+
+def _detect_archive_candidates(path: Path, declared_extension: str) -> list[str]:
+    candidates: list[str] = []
+    declared_kind = _ARCHIVE_EXTENSION_TO_KIND.get(declared_extension)
+    if declared_kind:
+        candidates.append(declared_kind)
+
+    try:
+        if zipfile.is_zipfile(path) and 'zip' not in candidates:
+            candidates.append('zip')
+    except OSError:
+        pass
+
+    try:
+        if rarfile.is_rarfile(path) and 'rar' not in candidates:
+            candidates.append('rar')
+    except OSError:
+        pass
+
+    try:
+        if py7zr.is_7zfile(path) and '7z' not in candidates:
+            candidates.append('7z')
+    except OSError:
+        pass
+
+    try:
+        if tarfile.is_tarfile(path) and 'tar' not in candidates:
+            candidates.append('tar')
+    except OSError:
+        pass
+
+    for kind in _ARCHIVE_KIND_PRIORITY:
+        if kind not in candidates:
+            candidates.append(kind)
+    return candidates
+
+
+def _resolve_comic_archive(
+    path: Path,
+    declared_extension: str,
+) -> tuple[str, list[str]]:
+    candidates = _detect_archive_candidates(path, declared_extension)
+    if not candidates:
+        raise ValueError("压缩包格式不可识别或已损坏")
+
+    first_error: Exception | None = None
+    for kind in candidates:
+        try:
+            if kind == 'zip':
+                image_files = _read_image_entries_from_zip(path)
+            elif kind == 'rar':
+                image_files = _read_image_entries_from_rar(path)
+            elif kind == '7z':
+                image_files = _read_image_entries_from_7z(path)
+            elif kind == 'tar':
+                image_files = _read_image_entries_from_tar(path)
+            else:
+                continue
+
+            image_files.sort(key=natural_sort_key)
+            if not image_files:
+                continue
+            return kind, image_files
+        except (
+            zipfile.BadZipFile,
+            rarfile.Error,
+            py7zr.exceptions.Bad7zFile,
+            py7zr.exceptions.PasswordRequired,
+            tarfile.TarError,
+            RuntimeError,
+            UnicodeError,
+            OSError,
+            ValueError,
+        ) as exc:
+            if first_error is None:
+                first_error = exc
+            continue
+
+    if first_error is not None:
+        raise ValueError(f"压缩包不可读取: {first_error}") from first_error
+    raise ValueError("未在压缩包中发现可读图片页面")
+
+
+def _read_page_data(path: Path, archive_kind: str, entry_name: str) -> bytes:
+    _ensure_safe_archive_entry(entry_name)
+    if archive_kind == 'zip':
+        with zipfile.ZipFile(path, 'r') as zf:
+            return zf.read(entry_name)
+    if archive_kind == 'rar':
+        with rarfile.RarFile(path, 'r') as rf:
+            return rf.read(entry_name)
+    if archive_kind == '7z':
+        return _read_7z_entry(path, entry_name)
+    if archive_kind == 'tar':
+        with tarfile.open(path, "r:*") as tf:
+            member = tf.getmember(entry_name)
+            file_handle = tf.extractfile(member)
+            if file_handle is None:
+                raise FileNotFoundError(f"tar 条目不存在: {entry_name}")
+            return file_handle.read()
+    raise ValueError(f"不支持的压缩格式: {archive_kind}")
+
+
 def get_comic_metadata(file_path: str) -> ComicMetadata:
     """
     获取漫画元数据
@@ -253,11 +476,6 @@ def get_comic_metadata(file_path: str) -> ComicMetadata:
         FileNotFoundError: 文件不存在
         ValueError: 不支持的格式
     """
-    cache_key = f"metadata:{file_path}"
-    if cache_key in metadata_cache:
-        logger.debug(f"从缓存获取漫画元数据: {file_path}")
-        return metadata_cache[cache_key]
-
     try:
         safe_path = validate_path(file_path)
         path = Path(safe_path)
@@ -265,43 +483,20 @@ def get_comic_metadata(file_path: str) -> ComicMetadata:
         if not path.exists():
             raise FileNotFoundError(f"漫画文件不存在: {file_path}")
 
+        signature_path, file_mtime_ns = _build_file_signature(path)
+        cache_key = f"metadata:{signature_path}:{file_mtime_ns}"
+        if cache_key in metadata_cache:
+            logger.debug(f"从缓存获取漫画元数据: {safe_path}")
+            return metadata_cache[cache_key]
+
         file_size = path.stat().st_size
-        file_format = path.suffix.lower()
+        file_format = _detect_declared_extension(path)
         file_id = generate_file_id(str(path))
 
-        if file_format not in ['.cbz', '.cbr', '.zip', '.7z']:
+        if file_format not in COMIC_ARCHIVE_FORMATS:
             raise ValueError(f"不支持的漫画格式: {file_format}")
 
-        image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'}
-        image_files = []
-
-        if file_format in ['.cbz', '.zip']:
-            with zipfile.ZipFile(path, 'r') as zf:
-                for name in zf.namelist():
-                    if name.startswith('__MACOSX'):
-                        continue
-                    ext = Path(name).suffix.lower()
-                    if ext in image_extensions and not name.endswith('/'):
-                        image_files.append(name)
-        elif file_format == '.cbr':
-            with rarfile.RarFile(path, 'r') as rf:
-                for name in rf.namelist():
-                    if name.startswith('__MACOSX'):
-                        continue
-                    ext = Path(name).suffix.lower()
-                    if ext in image_extensions and not name.endswith('/'):
-                        image_files.append(name)
-        elif file_format == '.7z':
-            with py7zr.SevenZipFile(path, 'r') as szf:
-                for info in szf.list():
-                    name = info.filename
-                    if name.startswith('__MACOSX') or info.is_directory:
-                        continue
-                    ext = Path(name).suffix.lower()
-                    if ext in image_extensions:
-                        image_files.append(name)
-
-        image_files.sort(key=natural_sort_key)
+        resolved_kind, image_files = _resolve_comic_archive(path, file_format)
 
         pages = []
         for i, filename in enumerate(image_files):
@@ -313,7 +508,7 @@ def get_comic_metadata(file_path: str) -> ComicMetadata:
         metadata = ComicMetadata(
             file_id=file_id,
             page_count=len(pages),
-            format=file_format[1:],
+            format=resolved_kind,
             file_size=file_size,
             pages=pages
         )
@@ -348,31 +543,28 @@ def get_page_image(file_path: str, page_num: int) -> bytes:
     if page_num < 1:
         raise IndexError(f"页码必须大于0: {page_num}")
 
-    cache_key = f"page:{file_path}:{page_num}"
-    if cache_key in page_cache:
-        logger.debug(f"从缓存获取漫画页面: {file_path}, 页码: {page_num}")
-        return page_cache[cache_key]
-
     try:
-        metadata = get_comic_metadata(file_path)
+        safe_path = validate_path(file_path)
+        path = Path(safe_path)
+        if not path.exists():
+            raise FileNotFoundError(f"漫画文件不存在: {file_path}")
+
+        signature_path, file_mtime_ns = _build_file_signature(path)
+        cache_key = f"page:{signature_path}:{file_mtime_ns}:{page_num}"
+        if cache_key in page_cache:
+            logger.debug(f"从缓存获取漫画页面: {safe_path}, 页码: {page_num}")
+            return page_cache[cache_key]
+
+        metadata = get_comic_metadata(safe_path)
 
         if page_num > metadata.page_count:
             raise IndexError(f"页码超出范围: {page_num} > {metadata.page_count}")
 
         page_info = metadata.pages[page_num - 1]
-        safe_path = validate_path(file_path)
-        path = Path(safe_path)
 
         image_data = None
 
-        if metadata.format in ['cbz', 'zip']:
-            with zipfile.ZipFile(path, 'r') as zf:
-                image_data = zf.read(page_info.filename)
-        elif metadata.format == 'cbr':
-            with rarfile.RarFile(path, 'r') as rf:
-                image_data = rf.read(page_info.filename)
-        elif metadata.format == '7z':
-            image_data = _read_7z_entry(path, page_info.filename)
+        image_data = _read_page_data(path, metadata.format, page_info.filename)
 
         if not image_data:
             raise ValueError(f"无法读取页面图片: {page_info.filename}")
@@ -381,11 +573,94 @@ def get_page_image(file_path: str, page_num: int) -> bytes:
 
         return image_data
 
-    except (FileNotFoundError, IndexError, ValueError):
+    except (
+        FileNotFoundError,
+        IndexError,
+        ValueError,
+        zipfile.BadZipFile,
+        rarfile.Error,
+        py7zr.exceptions.Bad7zFile,
+        py7zr.exceptions.PasswordRequired,
+        tarfile.TarError,
+    ) as exc:
+        if isinstance(
+            exc,
+            (
+                zipfile.BadZipFile,
+                rarfile.Error,
+                py7zr.exceptions.Bad7zFile,
+                py7zr.exceptions.PasswordRequired,
+                tarfile.TarError,
+            ),
+        ):
+            raise ValueError(f"压缩包不可读取: {exc}") from exc
         raise
     except Exception as e:
         logger.error(f"获取漫画页面失败: {file_path}, 页码: {page_num}, 错误: {e}")
         raise
+
+
+def get_cached_comic_cover(
+    file_path: str,
+    max_width: int = 420,
+    quality: int = 72,
+    output_format: str = "webp",
+) -> tuple[bytes, str, str]:
+    """
+    读取或生成漫画封面（默认第 1 页），并持久化到磁盘缓存。
+    """
+    safe_path = validate_path(file_path)
+    path = Path(safe_path)
+
+    if not path.exists():
+        raise FileNotFoundError(f"漫画文件不存在: {file_path}")
+
+    normalized_format = (output_format or "webp").lower()
+    if normalized_format not in {"jpeg", "png", "webp"}:
+        normalized_format = "webp"
+
+    signature_path, file_mtime_ns = _build_file_signature(path)
+    cache_identity, cache_path = _build_cover_cache_identity(
+        file_path=signature_path,
+        file_mtime_ns=file_mtime_ns,
+        max_width=max_width,
+        quality=quality,
+        output_format=normalized_format,
+    )
+    etag = f"W/\"{hashlib.md5(cache_identity.encode('utf-8')).hexdigest()}\""
+
+    if cache_identity in cover_binary_cache:
+        data, content_type = cover_binary_cache[cache_identity]
+        return data, content_type, etag
+
+    if cache_path.exists():
+        data = cache_path.read_bytes()
+        content_type = infer_image_content_type(cache_path.name)
+        cover_binary_cache[cache_identity] = (data, content_type)
+        return data, content_type, etag
+
+    metadata = get_comic_metadata(safe_path)
+    if metadata.page_count <= 0:
+        raise ValueError("漫画没有可读取页面")
+
+    source_name = metadata.pages[0].filename
+    image_data = get_page_image(safe_path, 1)
+    optimized_data, content_type = optimize_page_image_for_delivery(
+        cache_key=cache_identity,
+        image_data=image_data,
+        source_filename=source_name,
+        max_width=max_width,
+        quality=quality,
+        output_format=normalized_format,
+    )
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = cache_path.with_suffix(f"{cache_path.suffix}.tmp")
+    temp_path.write_bytes(optimized_data)
+    os.replace(temp_path, cache_path)
+
+    cover_binary_cache[cache_identity] = (optimized_data, content_type)
+    return optimized_data, content_type, etag
 
 
 def preload_page(file_path: str, page_num: int) -> None:
@@ -428,19 +703,40 @@ def clear_comic_cache(file_path: Optional[str] = None) -> None:
     Args:
         file_path: 如果指定，则只清理该文件的缓存；否则清理所有缓存
     """
-    global metadata_cache, page_cache
+    global metadata_cache, page_cache, optimized_page_cache, cover_binary_cache
 
     if file_path:
-        keys_to_remove = [k for k in metadata_cache.keys() if k == f"metadata:{file_path}"]
-        for key in keys_to_remove:
-            del metadata_cache[key]
+        target_paths = {file_path}
+        try:
+            target_paths.add(validate_path(file_path))
+        except Exception:
+            pass
 
-        keys_to_remove = [k for k in page_cache.keys() if k.startswith(f"page:{file_path}:")]
-        for key in keys_to_remove:
-            del page_cache[key]
+        for target in target_paths:
+            metadata_prefix = f"metadata:{target}:"
+            page_prefix = f"page:{target}:"
+            cover_prefix = f"cover:{target}:"
+
+            keys_to_remove = [k for k in metadata_cache.keys() if k.startswith(metadata_prefix)]
+            for key in keys_to_remove:
+                del metadata_cache[key]
+
+            keys_to_remove = [k for k in page_cache.keys() if k.startswith(page_prefix)]
+            for key in keys_to_remove:
+                del page_cache[key]
+
+            keys_to_remove = [k for k in optimized_page_cache.keys() if str(k).startswith(target)]
+            for key in keys_to_remove:
+                del optimized_page_cache[key]
+
+            keys_to_remove = [k for k in cover_binary_cache.keys() if str(k).startswith(cover_prefix)]
+            for key in keys_to_remove:
+                del cover_binary_cache[key]
 
         logger.info(f"清理漫画缓存: {file_path}")
     else:
         metadata_cache.clear()
         page_cache.clear()
+        optimized_page_cache.clear()
+        cover_binary_cache.clear()
         logger.info("清理所有漫画缓存")

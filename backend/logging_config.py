@@ -12,6 +12,26 @@ from logging.handlers import RotatingFileHandler
 from backend.config import get_config
 
 
+class ColoredFormatter(logging.Formatter):
+    """带颜色的控制台日志格式化器"""
+    COLORS = {
+        'DEBUG': '\033[90m',      # 灰色
+        'INFO': '\033[36m',       # 青色
+        'WARNING': '\033[33m',    # 黄色
+        'ERROR': '\033[31m',      # 红色
+        'CRITICAL': '\033[1;31m', # 粗体红色
+    }
+    RESET = '\033[0m'
+    
+    def format(self, record):
+        color = self.COLORS.get(record.levelname, self.RESET)
+        time_str = f"\033[90m[{self.formatTime(record, self.datefmt)}]\033[0m"
+        level_str = f"{color}{record.levelname:<8}{self.RESET}"
+        name_str = f"\033[35m{record.name:<20}\033[0m"  # 紫色模块名
+        msg_str = f"{color}{record.getMessage()}{self.RESET}"
+        
+        return f"{time_str} {level_str} | {name_str} | {msg_str}"
+
 def setup_logging() -> logging.Logger:
     """
     设置日志系统
@@ -41,10 +61,7 @@ def setup_logging() -> logging.Logger:
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
     
-    console_formatter = logging.Formatter(
-        "[%(asctime)s] %(levelname)-8s | %(name)-20s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
+    console_formatter = ColoredFormatter(datefmt="%H:%M:%S")
     console_handler.setFormatter(console_formatter)
     logger.addHandler(console_handler)
 

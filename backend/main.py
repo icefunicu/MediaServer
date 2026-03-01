@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse
 
 from backend.config import get_config, load_config
 from backend.logging_config import get_logger, setup_logging
-from backend.routers import files, video, comic, archive
+from backend.routers import archive, comic, files, library, settings, video
 from backend.middleware.error_handler import setup_error_handlers
 from backend.middleware.concurrency_limiter import setup_concurrency_limiter
 
@@ -80,6 +80,8 @@ def create_app() -> FastAPI:
         }
 
     app.include_router(files.router)
+    app.include_router(settings.router)
+    app.include_router(library.router)
     app.include_router(video.router)
     app.include_router(comic.router)
     app.include_router(archive.router)

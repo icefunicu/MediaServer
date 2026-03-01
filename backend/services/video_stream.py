@@ -7,6 +7,7 @@
 import os
 import shutil
 import subprocess
+import hashlib
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -31,6 +32,11 @@ from backend.services.range_parser import (
 logger = get_logger("video_stream")
 
 IOS_NATIVE_CONTAINERS = {".mp4", ".m4v", ".mov"}
+BROWSER_NATIVE_CONTAINERS = {".mp4", ".m4v", ".mov", ".webm", ".ogg"}
+REMUX_RISKY_CONTAINERS = {".ts", ".m2ts", ".mts", ".vob", ".mpg", ".mpeg", ".tp"}
+BROWSER_COMPAT_VIDEO_CODECS = {"h264"}
+BROWSER_COMPAT_AUDIO_CODECS = {"aac", "mp3"}
+BROWSER_COMPAT_PIXEL_FORMAT_PREFIXES = ("yuv420",)
 
 
 class VideoMetadata:
@@ -339,13 +345,205 @@ def get_transcoded_cache_path(file_id: str, target_format: str) -> str:
     return str(cache_dir / f"{file_id}.{target_format}")
 
 
+def _probe_primary_av_streams(file_path: Path) -> tuple[Optional[dict], Optional[dict], str]:
+    """Return primary video/audio stream metadata with format name."""
+    try:
+        probe = ffmpeg.probe(str(file_path))
+    except ffmpeg.Error:
+        return None, None, ""
+
+    streams = probe.get("streams") or []
+    video_stream = next((s for s in streams if s.get("codec_type") == "video"), None)
+    audio_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    format_name = str((probe.get("format") or {}).get("format_name", "")).lower()
+    return video_stream, audio_stream, format_name
+
+
+def _has_browser_compatible_codecs(file_path: Path) -> bool:
+    """Check whether codecs are natively decodable by mainstream browsers."""
+    video_stream, audio_stream, _ = _probe_primary_av_streams(file_path)
+    if not video_stream:
+        return False
+
+    video_codec = str(video_stream.get("codec_name", "")).lower()
+    if video_codec not in BROWSER_COMPAT_VIDEO_CODECS:
+        return False
+
+    pixel_format = str(video_stream.get("pix_fmt", "")).lower()
+    if pixel_format and not pixel_format.startswith(BROWSER_COMPAT_PIXEL_FORMAT_PREFIXES):
+        return False
+
+    if audio_stream:
+        audio_codec = str(audio_stream.get("codec_name", "")).lower()
+        if audio_codec not in BROWSER_COMPAT_AUDIO_CODECS:
+            return False
+
+    return True
+
+
+def _is_browser_compatible_mp4(file_path: Path) -> bool:
+    """Check whether file is MP4 container + browser-compatible codecs."""
+    _, _, format_name = _probe_primary_av_streams(file_path)
+    if "mp4" not in format_name:
+        return False
+    return _has_browser_compatible_codecs(file_path)
+
+
+def _can_fast_remux_to_compatible_mp4(file_path: Path) -> bool:
+    """
+    Decide whether copy-remux is safe enough.
+    Risky source containers (ts/m2ts/vob/...) go through re-encode directly.
+    """
+    if file_path.suffix.lower() in REMUX_RISKY_CONTAINERS:
+        return False
+    return _has_browser_compatible_codecs(file_path)
+
+
+def ensure_compatible_mp4(file_path: str, file_id: str) -> str:
+    """
+    Build (or reuse) a cached MP4 file for broad browser compatibility.
+    The generated file is seekable via HTTP Range and exposes full duration.
+    """
+    safe_path = validate_path(file_path)
+    input_file = Path(safe_path)
+    if not input_file.exists():
+        raise FileNotFoundError(f"Video file not found: {file_path}")
+
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if not ffmpeg_bin:
+        raise RuntimeError("FFmpeg is not installed or unavailable")
+
+    output_file = Path(get_transcoded_cache_path(file_id, "mp4"))
+    if output_file.exists() and output_file.stat().st_size > 0:
+        if (
+            output_file.stat().st_mtime >= input_file.stat().st_mtime
+            and _is_browser_compatible_mp4(output_file)
+        ):
+            return str(output_file)
+        logger.warning(f"Discarding stale or incompatible cache file: {output_file}")
+        output_file.unlink(missing_ok=True)
+
+    tmp_file = output_file.with_name(f"{output_file.name}.tmp")
+    if tmp_file.exists():
+        tmp_file.unlink()
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    remux_cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(input_file),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        "-f",
+        "mp4",
+        str(tmp_file),
+    ]
+
+    reencode_cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(input_file),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "160k",
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
+        "-f",
+        "mp4",
+        str(tmp_file),
+    ]
+
+    try:
+        remux_ok = False
+        if _can_fast_remux_to_compatible_mp4(input_file):
+            try:
+                subprocess.run(
+                    remux_cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=True,
+                    timeout=3600,
+                )
+                remux_ok = tmp_file.exists() and tmp_file.stat().st_size > 0 and _is_browser_compatible_mp4(tmp_file)
+                if not remux_ok:
+                    logger.warning(f"Remux output is not browser-compatible, fallback to re-encode: {input_file}")
+                    tmp_file.unlink(missing_ok=True)
+            except Exception:
+                remux_ok = False
+                tmp_file.unlink(missing_ok=True)
+
+        if not remux_ok:
+            subprocess.run(
+                reencode_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+                timeout=7200,
+            )
+
+        if (
+            not tmp_file.exists()
+            or tmp_file.stat().st_size <= 0
+            or not _is_browser_compatible_mp4(tmp_file)
+        ):
+            raise RuntimeError("Failed to generate compatible MP4 cache file")
+
+        tmp_file.replace(output_file)
+        return str(output_file)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Compatible MP4 conversion timed out") from exc
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError("Compatible MP4 conversion failed") from exc
+    finally:
+        if tmp_file.exists():
+            tmp_file.unlink(missing_ok=True)
+
+
 def needs_ios_compatible_transcoding(file_path: str) -> bool:
     """判断视频是否需要 iOS 兼容转码。"""
+    return needs_compatible_transcoding(file_path, is_ios_client=True)
+
+
+def needs_compatible_transcoding(file_path: str, is_ios_client: bool = False) -> bool:
+    """Determine whether a file should use compatibility transcoding."""
     extension = Path(file_path).suffix.lower()
-    return extension not in IOS_NATIVE_CONTAINERS
+    native_containers = IOS_NATIVE_CONTAINERS if is_ios_client else BROWSER_NATIVE_CONTAINERS
+    return extension not in native_containers
 
 
-def create_ios_compatible_stream(file_path: str, chunk_size: int = 256 * 1024) -> Iterator[bytes]:
+def create_ios_compatible_stream(
+    file_path: str,
+    chunk_size: int = 256 * 1024,
+    start_seconds: float = 0.0,
+) -> Iterator[bytes]:
     """
     将任意视频实时转码为 iOS 兼容的 fragmented MP4（H264/AAC）。
 
@@ -362,11 +560,26 @@ def create_ios_compatible_stream(file_path: str, chunk_size: int = 256 * 1024) -
     if not ffmpeg_bin:
         raise RuntimeError("FFmpeg 未安装或不可用，无法进行 iOS 兼容转码")
 
+    normalized_start = 0.0
+    try:
+        parsed_start = float(start_seconds)
+        if parsed_start > 0:
+            normalized_start = parsed_start
+    except (TypeError, ValueError):
+        normalized_start = 0.0
+
     command = [
         ffmpeg_bin,
         "-nostdin",
         "-hide_banner",
         "-loglevel", "error",
+    ]
+
+    if normalized_start > 0:
+        # Place -ss before input for fast seek on open/drag operations.
+        command.extend(["-ss", f"{normalized_start:.3f}"])
+
+    command.extend([
         "-i", str(path),
         "-map", "0:v:0",
         "-map", "0:a:0?",
@@ -383,7 +596,7 @@ def create_ios_compatible_stream(file_path: str, chunk_size: int = 256 * 1024) -
         "-movflags", "frag_keyframe+empty_moov+default_base_moof+faststart",
         "-f", "mp4",
         "pipe:1",
-    ]
+    ])
 
     process = subprocess.Popen(
         command,
@@ -409,3 +622,78 @@ def create_ios_compatible_stream(file_path: str, chunk_size: int = 256 * 1024) -
                 process.stdout.close()
 
     return _iter_stream()
+
+
+def get_thumbnail_cache_path(file_id: str, timestamp_str: str) -> Path:
+    """获取缩略图缓存文件路径"""
+    cache_dir = Path(__file__).resolve().parents[2] / "cache" / "thumbnails"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 用哈希避免文件名在不同系统中的非法字符问题
+    hash_key = hashlib.md5(f"{file_id}_{timestamp_str}".encode('utf-8')).hexdigest()
+    return cache_dir / f"{hash_key}.jpg"
+
+
+def generate_video_thumbnail(file_path: str, file_id: str, timestamp_str: str = "00:00:05") -> str:
+    """
+    生成视频指定时间点的缩略图，并返回缓存的文件路径
+    """
+    safe_path = validate_path(file_path)
+    path = Path(safe_path)
+    if not path.exists():
+        raise FileNotFoundError(f"视频文件不存在: {file_path}")
+
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if not ffmpeg_bin:
+        raise RuntimeError("FFmpeg 未安装或不可用")
+
+    cache_path = get_thumbnail_cache_path(file_id, timestamp_str)
+    
+    if cache_path.exists() and cache_path.stat().st_size > 0:
+        return str(cache_path)
+
+    # 用临时文件生成，避免并发读取到未完成的文件
+    tmp_path = cache_path.with_suffix(".tmp")
+
+    command = [
+        ffmpeg_bin,
+        "-y",               # 覆盖输出
+        "-ss", timestamp_str,
+        "-i", str(path),
+        "-vframes", "1",    # 只提取 1 帧
+        "-q:v", "2",        # 高质量 JPEG
+        "-f", "image2",
+        str(tmp_path)
+    ]
+
+    try:
+        subprocess.run(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+            timeout=30 # 超时时间 30s
+        )
+        
+        # 原子性重命名
+        if tmp_path.exists() and tmp_path.stat().st_size > 0:
+            tmp_path.replace(cache_path)
+            return str(cache_path)
+        else:
+            raise RuntimeError("ffmpeg 生成缩略图失败(文件为空)")
+            
+    except subprocess.CalledProcessError as e:
+        logger.error(f"ffmpeg 生成缩略图失败: {e}")
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise RuntimeError(f"生成缩略图失败由于 ffmpeg 错误: {e}")
+    except subprocess.TimeoutExpired:
+        logger.error(f"ffmpeg 生成缩略图超时: {file_path}")
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise RuntimeError("生成缩略图超时")
+    except Exception as e:
+        logger.error(f"生成缩略图发生意外错误: {e}")
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise

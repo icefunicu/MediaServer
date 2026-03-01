@@ -1,58 +1,102 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
+
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
-    <meta name="description" content="本地媒体服务器 - 视频流媒体播放、漫画阅读、文件浏览">
-    <title>本地媒体服务器</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="本地媒体库：电影、剧集、音乐、图片、漫画与压缩包统一管理。">
+    <title>MediaVault 本地媒体库</title>
     <link rel="stylesheet" href="/static/styles.css">
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📺</text></svg>">
 </head>
+
 <body>
-    <header class="header">
-        <div class="header-content">
-            <h1 class="logo" onclick="goHome()">📺 本地媒体服务器</h1>
-            <div class="search-box">
-                <input type="text" id="searchInput" placeholder="搜索文件..." onkeypress="handleSearch(event)">
-                <button onclick="searchFiles()" class="btn-search">搜索</button>
-            </div>
-        </div>
-    </header>
-
-    <main class="main-content">
-        <nav class="breadcrumb" id="breadcrumb">
-            <span onclick="goHome()" class="breadcrumb-item">根目录</span>
-        </nav>
-
-        <div class="view-container" id="viewContainer">
-            <div class="file-browser" id="fileBrowser">
-                <div class="file-list" id="fileList"></div>
-            </div>
-
-            <div class="media-viewer hidden" id="mediaViewer">
-                <div class="viewer-header">
-                    <button class="btn-back" onclick="closeViewer()">← 返回</button>
-                    <h2 id="viewerTitle"></h2>
+    <div class="app-shell">
+        <aside class="sidebar" id="sidebar">
+            <div class="brand">
+                <div class="brand-icon">MV</div>
+                <div>
+                    <p class="brand-title">MediaVault</p>
+                    <p class="brand-subtitle">本地媒体库</p>
                 </div>
-                <div class="viewer-content" id="viewerContent"></div>
             </div>
-        </div>
 
-        <div class="loading-overlay hidden" id="loadingOverlay">
-            <div class="spinner"></div>
-            <p>加载中...</p>
-        </div>
+            <button class="sidebar-toggle" id="sidebarToggle" aria-label="折叠侧栏">◀</button>
 
-        <div class="error-toast hidden" id="errorToast">
-            <p id="errorMessage"></p>
-            <button onclick="closeError()">关闭</button>
-        </div>
-    </main>
+            <nav class="sidebar-group" aria-label="媒体库导航">
+                <p class="sidebar-label" aria-hidden="true">媒体库</p>
+                <button class="nav-item active" data-view="home">首页</button>
+                <button class="nav-item" data-view="movies">电影</button>
+                <button class="nav-item" data-view="tv">剧集</button>
+                <button class="nav-item" data-view="anime">动漫</button>
+                <button class="nav-item" data-view="jdrama">日剧</button>
+                <button class="nav-item" data-view="music">音乐</button>
+                <button class="nav-item" data-view="photos">图片</button>
+                <button class="nav-item" data-view="comics">漫画</button>
+                <button class="nav-item" data-view="archives">压缩包</button>
+            </nav>
 
-    <footer class="footer">
-        <p>本地媒体服务器 v1.0.0 | 前端 <span id="appVersion">loading</span></p>
-    </footer>
+            <nav class="sidebar-group" aria-label="快速访问导航">
+                <p class="sidebar-label" aria-hidden="true">快速访问</p>
+                <button class="nav-item" data-view="recent">最近新增</button>
+                <button class="nav-item" data-view="favorites">我的收藏</button>
+                <button class="nav-item" data-view="settings">设置</button>
+            </nav>
 
-    <script src="/static/app.js?v=20260227-6"></script>
+            <section class="storage-card" id="storageCard">
+                <div class="storage-title">存储空间</div>
+                <div class="storage-track">
+                    <div class="storage-bar" id="storageBar"></div>
+                </div>
+                <p class="storage-meta" id="storageMeta">加载中...</p>
+            </section>
+        </aside>
+
+        <main class="main-panel">
+            <header class="topbar">
+                <div>
+                    <h1 class="page-title" id="pageTitle">首页</h1>
+                    <p class="page-subtitle" id="pageSubtitle">正在加载媒体库...</p>
+                </div>
+                <div class="topbar-controls">
+                    <label class="search-box">
+                        <span>🔍</span>
+                        <input type="search" id="searchInput" placeholder="搜索媒体名称或路径">
+                        <button class="clear-search hidden" id="clearSearch" aria-label="清空搜索">✕</button>
+                    </label>
+                    <div class="view-switch">
+                        <button id="viewGrid" class="active" aria-label="网格视图">网格</button>
+                        <button id="viewList" aria-label="列表视图">列表</button>
+                    </div>
+                </div>
+            </header>
+
+            <section class="content-area" id="contentArea"></section>
+        </main>
+    </div>
+
+    <div class="player-screen hidden" id="playerScreen" role="dialog" aria-modal="true">
+        <div id="playerScreenBody"></div>
+    </div>
+
+    <div class="detail-modal hidden" id="detailModal" role="dialog" aria-modal="true">
+        <div class="detail-backdrop" id="detailBackdrop"></div>
+        <article class="detail-panel">
+            <button class="detail-close" id="detailClose" aria-label="关闭">✕</button>
+            <div id="detailBody"></div>
+        </article>
+    </div>
+
+    <div class="loading-overlay hidden" id="loadingOverlay">
+        <div class="spinner"></div>
+        <p>正在加载...</p>
+    </div>
+
+    <div class="error-toast hidden" id="errorToast">
+        <p id="errorMessage"></p>
+        <button id="errorClose">关闭</button>
+    </div>
+
+    <script type="module" src="/static/js/main.js"></script>
 </body>
+
 </html>

@@ -244,3 +244,122 @@ MIT License
 ## 贡献
 
 欢迎提交 Issue 和 Pull Request！
+
+---
+
+## 2026-03 Dashboard & 分类接口更新
+
+本次更新将首页改为 Figma 设计风格的媒体库仪表盘，并新增了面向前端分类展示的接口。
+
+### 新增分类能力
+
+- 新增文件类型识别：`music`、`photo`
+- 视频进一步按命名规则自动拆分为：`movies`、`tv`
+- 汇总分类：`movies`、`tv`、`music`、`photos`、`comics`、`archives`、`others`
+
+### 新增 API
+
+- `GET /api/library/categories`：返回可用分类
+- `GET /api/library/overview`：返回总数、分类计数、存储占用、最近添加、精选项
+- `GET /api/library/category/{category}`：按分类查询媒体，支持参数：
+  - `query`：搜索关键词
+  - `sort`：`recent` / `name` / `size`
+  - `limit` / `offset`：分页
+  - `refresh`：是否强制刷新扫描缓存
+- `GET /api/files/raw?path=...`：输出原始媒体文件流（图片/音乐等预览）
+
+### 前端变化
+
+- 布局改为：左侧导航 + 顶栏搜索/视图切换 + 内容区 + 详情弹窗
+- 首页新增：精选横幅、分类统计、最近添加、分区内容
+- 分类页支持：网格/列表切换、搜索、收藏（本地浏览器存储）
+- 详情弹窗支持：
+  - 视频：直接播放
+  - 音乐：音频试听
+  - 照片：大图预览
+  - 漫画：封面与页数信息
+  - 压缩包：内容列表与在线提取下载
+
+## 2026-03-01 迭代更新（媒体库可用性）
+
+### 新增与修复
+
+- 后端媒体库新增 SQLite 快照落库（`cache/library_snapshot.db`），用于保存扫描结果并在重启后快速恢复。
+- `/api/library/overview` 与 `/api/library/category/{category}` 新增参数：`group_tv`（默认 `true`），用于按“剧 -> 分集”聚合展示。
+- TV 聚合返回项新增字段（按需出现）：`is_group`、`episode_count`、`season_count`、`episodes`、`episode_no`、`season_no`、`episode_label`。
+- 前端详情页新增剧集分集播放（按季分组），并支持直接逐集打开播放流。
+- 漫画详情升级为可翻页阅读器（上一页/下一页/跳页/键盘左右键），不再仅显示封面。
+- 漫画接口增强：支持 `.rar` 作为漫画包候选；当压缩包没有图片页时返回明确错误。
+- 修复主界面滚动问题：桌面端内容区支持纵向滚动，移动端保持可滑动。
+
+### 验证方式
+
+- 编译检查：`\.venv\Scripts\python -m compileall backend tests`
+- 测试：`\.venv\Scripts\python -m pytest -q`
+- 前端语法检查：`node --check frontend/app.js`
+
+## 2026-03-01 Settings Center
+
+- New API:
+  - `GET /api/settings`: read current app settings.
+  - `PATCH /api/settings`: update media root and UI settings.
+- UI settings persistence file: `config/app_settings.json`.
+- `PATCH /api/settings` supports:
+  - `media_root_directory`: set media root directory (optional).
+  - `create_media_root_if_missing`: auto create root directory when missing.
+  - `ui.home_hidden_roots` / `ui.home_hidden_categories`: hide items on homepage.
+  - `ui.recent_hidden_roots` / `ui.recent_hidden_categories`: hide items in recent view.
+  - `ui.home_featured_enabled`: enable or disable homepage featured banner.
+  - `ui.default_layout`: `grid` or `list`.
+  - `ui.player_autoplay_default`: default autoplay behavior for series playback.
+  - `ui.group_tv_by_default`: default TV grouping behavior.
+  - `ui.home_recent_limit`: homepage recent item limit (`1-60`).
+  - `ui.category_page_limit`: category page fetch size (`60-500`).
+
+## 2026-03-01 Media Category & Playback Update
+
+- Added new library categories:
+  - `anime`
+  - `jdrama`
+- Comic items now return first-page cover thumbnails in library APIs.
+- Added `.vob` to supported video formats and mime mapping.
+- Video stream endpoint now auto-switches to compatibility MP4 cache when container is not natively playable by browser.
+
+## 2026-03-01 Comic Reader Upgrade
+
+### What changed
+
+- Added dedicated comic cover endpoint with cache:
+  - `GET /api/comic/cover?path=...&max_width=420&quality=72&format=webp`
+- Comic cards now use `/api/comic/cover` instead of rendering page 1 on every list request.
+- Comic reader UI is now a separate full-screen reader with vertical scroll reading.
+- Reader supports lazy loading images, scroll-position page tracking, and page jump.
+
+### Format support
+
+- Comic archives:
+  - `.cbz`, `.zip`
+  - `.cbr`, `.rar`
+  - `.cb7`, `.7z`
+  - `.cbt`, `.tar`, `.tar.gz`, `.tgz`, `.tar.bz2`, `.tbz2`, `.tar.xz`, `.txz`
+- Image entries:
+  - `.jpg`, `.jpeg`, `.jpe`, `.jfif`, `.jfi`, `.jif`
+  - `.png`, `.gif`, `.webp`, `.bmp`, `.dib`
+  - `.tif`, `.tiff`, `.avif`, `.heic`, `.pbm`, `.pgm`, `.ppm`
+
+### Cache behavior
+
+- Memory cache:
+  - metadata cache
+  - page bytes cache
+  - optimized image cache
+  - cover bytes cache
+- Disk cache:
+  - cover image cache path: `cache/comic_covers/`
+- Cache keys include file mtime, so file replacement automatically invalidates old cache.
+
+### Video quick-start stream
+
+- `GET /api/video/stream` supports optional `start` (seconds) when `ios_compat=1`.
+- Example: `GET /api/video/stream?path=/demo.mkv&ios_compat=1&start=42.5`
+- This mode returns live fragmented MP4 from the requested progress point for faster open/seek.

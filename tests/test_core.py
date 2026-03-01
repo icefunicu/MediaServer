@@ -3,7 +3,9 @@ Core unit tests for filesystem and range parsing helpers.
 """
 
 import os
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -24,6 +26,7 @@ from backend.services.range_parser import (
     build_range_response_headers,
     parse_range_header,
 )
+from backend.services.video_stream import ensure_compatible_mp4
 
 
 class TestPathValidation:
@@ -42,6 +45,10 @@ class TestPathValidation:
     def test_parent_directory_blocked(self):
         with pytest.raises(SecurityError):
             validate_path("test/../config.yaml")
+
+    def test_filename_with_ellipsis_allowed(self):
+        path = validate_path("/JMV/sample...video.ts")
+        assert path.endswith("sample...video.ts")
 
     def test_system_directory_blocked(self):
         with pytest.raises(SecurityError):
@@ -109,3 +116,80 @@ class TestFileSystem:
         entries = search_files("config")
         assert isinstance(entries, list)
 
+
+class TestCompatibleTranscoding:
+    def test_ensure_compatible_mp4_remux_explicit_mp4_format(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import backend.services.video_stream as video_stream
+
+        input_path = tmp_path / "sample.ts"
+        input_path.write_bytes(b"sample-data")
+        output_path = tmp_path / "cache" / "sample.mp4"
+        commands: list[list[str]] = []
+
+        monkeypatch.setattr(video_stream, "validate_path", lambda p: str(Path(p)))
+        monkeypatch.setattr(
+            video_stream,
+            "get_transcoded_cache_path",
+            lambda _file_id, _target: str(output_path),
+        )
+        monkeypatch.setattr(video_stream.shutil, "which", lambda _bin: "ffmpeg")
+        monkeypatch.setattr(video_stream, "_can_fast_remux_to_compatible_mp4", lambda _path: True)
+        monkeypatch.setattr(video_stream, "_is_browser_compatible_mp4", lambda _path: True)
+
+        def fake_run(cmd, **_kwargs):
+            commands.append(cmd)
+            Path(cmd[-1]).write_bytes(b"mp4-cache")
+
+        monkeypatch.setattr(video_stream.subprocess, "run", fake_run)
+
+        cache_path = ensure_compatible_mp4(str(input_path), "id-1")
+
+        assert cache_path == str(output_path)
+        assert output_path.exists()
+        assert commands
+        assert "-f" in commands[0]
+        fmt_index = commands[0].index("-f")
+        assert commands[0][fmt_index + 1] == "mp4"
+
+    def test_ensure_compatible_mp4_reencode_explicit_mp4_format(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import backend.services.video_stream as video_stream
+
+        input_path = tmp_path / "sample.ts"
+        input_path.write_bytes(b"sample-data")
+        output_path = tmp_path / "cache" / "sample.mp4"
+        commands: list[list[str]] = []
+
+        monkeypatch.setattr(video_stream, "validate_path", lambda p: str(Path(p)))
+        monkeypatch.setattr(
+            video_stream,
+            "get_transcoded_cache_path",
+            lambda _file_id, _target: str(output_path),
+        )
+        monkeypatch.setattr(video_stream.shutil, "which", lambda _bin: "ffmpeg")
+        monkeypatch.setattr(video_stream, "_can_fast_remux_to_compatible_mp4", lambda _path: True)
+        monkeypatch.setattr(video_stream, "_is_browser_compatible_mp4", lambda _path: True)
+
+        def fake_run(cmd, **_kwargs):
+            commands.append(cmd)
+            if len(commands) == 1:
+                raise subprocess.CalledProcessError(returncode=1, cmd=cmd)
+            Path(cmd[-1]).write_bytes(b"mp4-cache")
+
+        monkeypatch.setattr(video_stream.subprocess, "run", fake_run)
+
+        cache_path = ensure_compatible_mp4(str(input_path), "id-2")
+
+        assert cache_path == str(output_path)
+        assert output_path.exists()
+        assert len(commands) == 2
+        assert "-f" in commands[1]
+        fmt_index = commands[1].index("-f")
+        assert commands[1][fmt_index + 1] == "mp4"

@@ -52,3 +52,6 @@ media/
 # Generated analysis docs (local)
 STAR_REPO_INVENTORY.md
 STAR_REPO_STAR.md
+
+cache/
+agent_runs/
